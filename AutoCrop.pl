@@ -6,7 +6,7 @@ use Cwd qw(getcwd cwd);
 use Image::Magick;
 use TRecord;
 
-use Getopt::Long qw(:config no_ignore_case);
+use Getopt::Long qw(:config no_ignore_case bundling);
 
 my($image, $x); 
 my $PGROUP = 3; # number of array elements for each pixel from GetPixels
@@ -62,7 +62,8 @@ if (!$ddir) {
 	$ddir = "$sdir";
 }
 if ((substr($ddir,0,1) ne '/') &&
-    (substr($ddir,0,1) ne '.')) { # force through next check.
+    (substr($ddir,0,1) ne '.') &&
+	($ddir !~ m/^[a-z]:/i)) { # force through next check.
   $ddir = "./$ddir";
 }
 if (substr($ddir,0,2) eq './') {  
@@ -73,9 +74,7 @@ if (substr($ddir,0,2) eq './') {
 	  $ddir = $sdir;
   }
 }
-if (($suffix eq "''") || ($suffix eq '""')) {
-	$suffix = '';
-}
+
 if ((($ddir eq $sdir) || !$ddir) &&
     !$suffix && !$overwrite) {
    push @ierrors, "Source and Dest directories are same, you've given an empty suffix, but no ovewrite option";
@@ -123,6 +122,26 @@ if (@ARGV) {
 		}
 	}
 }
+if ($in_fname && (!-f "$in_fname")) {
+   if (-f "$sdir/$in_fname") {
+	  $in_fname = "$sdir/$in_fname";
+   } else {
+	   push @ierrors, "input filename '$in_fname' doesn't exist";
+   }
+}
+# Check for where we write to out fname
+if ($out_fname) {
+	if (index($out_fname,'/') >= 0) { # probably has a path.
+		my @path = split /\//, $out_fname;
+		pop @path;  # get rid of filename.
+		my $npath = join ( '/', @path);
+		if (!-d "$npath") {
+			push @ierrors, "Can't write to filename/path $out_fname\n";
+		}
+	} else { #tack '$ddir' onto it
+		$out_fname = "$ddir/$out_fname";
+	}
+}
 
 if (@ierrors) {
 	usage (@ierrors);
@@ -161,6 +180,8 @@ if ($DEBUG > 0) {
 	print "Suffix: $suffix\n";
 	print "Tolerance: $tolerance\n";
 	print "Docrop: $docrop\n";
+	print "Input Filename: $in_fname\n";
+	print "Output filename: $out_fname\n";
 	if ($all) {
 	  print "Crop All\n";
 	} else {
@@ -176,12 +197,40 @@ if ($DEBUG > 0) {
 
 
 # Main read loop
-if (!opendir(INDIR,".")) {
-	print STDERR "Can't open\n";
-	exit 1;
+if ($out_fname) {
+	if (!open(OUTFILE, ">$out_fname")) {
+	  print STDERR "Unale to open '$out_fname' for writing\n";
+	  exit 1;
+	}
 }
-while (my $fname = readdir(INDIR)) {
-	if (!-f "$fname") {
+if ($in_fname) {
+	if (!open(INFILE, "<$in_fname")) {
+			print STDERR "Unable to open '$in_fname' for reading\n";
+			exit 1;
+	}
+} else {
+	if (!opendir(INDIR,"$sdir")) {
+		print STDERR "Can't open\n";
+		exit 1;
+	}
+}
+while (1) {
+	my $fname = '';
+	my $fsdir = $sdir;
+	my $fddir = $ddir;
+	if ($in_fname) {
+	  $fname = <INFILE>;
+	  last if !$fname;
+	  chomp $fname;
+	  next if ($fname =~ m/^\s*$/);
+	  my @path = split /\//, $fname;
+	  $fname = pop @path;
+	  $fsdir = join('/', @path);
+	} else {
+		$fname = readdir(INDIR);
+		last if (!$fname);
+    }
+	if (!-f "$fsdir/$fname") {
 		next;
 	}
 	my ($inname,$type) = split /\./, $fname;
@@ -195,7 +244,7 @@ while (my $fname = readdir(INDIR)) {
 	my $outname = $inname . "$suffix";
 	print "FILE:$inname,$type,$outname\n";
 	my $im= Image::Magick->new;
-	my $x = $im->Read($fname);
+	my $x = $im->Read("$fsdir//$fname");
 	warn "$x" if "$x";
 	my $itol = new TRecord('image',0,1);
 	$x = Calculate($im, $crop_colour, $itol);
@@ -203,7 +252,9 @@ while (my $fname = readdir(INDIR)) {
 	print "Image tolerances: $mint - $maxt\n";
 	
 	if ($x > 0) { # something changed
-	
+		if ($out_fname) {
+			print OUTFILE "$fsdir/$fname\n";
+		}		 
 		if ($UPDATE) {
 			$x = $im->Write("$ddir/$outname.$type");
 			warn "$x" if "$x";
@@ -217,8 +268,14 @@ while (my $fname = readdir(INDIR)) {
 		 print "nothing changed\n";
 	}
 }
-closedir(INDIR);
-
+if ($out_fname) {
+  close(OUTFILE);
+} 
+if ($in_fname) {
+		close(INFILE);
+} else {
+	closedir(INDIR);
+}
 
 sub Calculate {
 	my ($im, $crop_colour,$tol) = @_;
