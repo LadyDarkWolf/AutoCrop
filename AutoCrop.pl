@@ -5,7 +5,9 @@ use Cwd qw(getcwd cwd);
 
 use Image::Magick;
 use TRecord;
-
+use WPath;
+use File::Spec (qw(catdir catfile curdir is_case_tolerant file_name_is_absolute
+                    splitpath splitdir catpath rel2abs));
 use Getopt::Long qw(:config no_ignore_case bundling);
 
 my($image, $x); 
@@ -16,8 +18,9 @@ my $ccrop_colour = undef;
 
 
 # Things changed by GetOptions
-my $sdir = '';
-my $ddir = '';
+my $bpath = '';
+my $spath = '';
+my $dpath = '';
 my $out_fname = '';
 my $in_fname = '';
 my $crop_colour_text = '';
@@ -33,10 +36,11 @@ my $all = 1;
 my $create_dir = 0;
 my $tolerance = 0.0;
 my $suffix = '_trimmed';
-
+my $path_case_tolerant = File::Spec->case_tolerant();
 my $rv = GetOptions(
-           'source_dir|src_dir|sdir=s' => \$sdir,
-		   'destination_dir|dest_dir|ddir=s' => \$ddir,
+           'base_dir|bdir' => \$bpath,
+           'source_dir|src_dir|sdir=s' => \$spath,
+		   'destination_dir|dest_dir|ddir=s' => \$dpath,
 		   'CREATE_DIR|CREATE-DIR|CD!' => \$create_dir,
 		   'suf|s|suffix:s' => \$suffix,
 		   'UPDATE|U!' => \$UPDATE,
@@ -55,35 +59,43 @@ my $rv = GetOptions(
 		   
 my @ierrors = (); # input errors
 
-if (!$sdir || ($sdir eq './')) {
-   $sdir = '.';
-}
-if (!$ddir) {
-	$ddir = "$sdir";
-}
-if ((substr($ddir,0,1) ne '/') &&
-    (substr($ddir,0,1) ne '.') &&
-	($ddir !~ m/^[a-z]:/i)) { # force through next check.
-  $ddir = "./$ddir";
-}
-if (substr($ddir,0,2) eq './') {  
-  if (length($ddir) > 2) {
-	 $ddir = substr($ddir,2);
-	 $ddir = "$sdir/$ddir";
-  } else {
-	  $ddir = $sdir;
+if (!$bpath) {
+  $bpath = new WPath();
+} else {
+   $bpath = new WPath($bpath, 0);
+  if (!$bpath->IsAbsolute()) {
+	  $bpath->ToAbsolute();
   }
 }
 
-if ((($ddir eq $sdir) || !$ddir) &&
-    !$suffix && !$overwrite) {
+if (!$spath) {
+	$spath = new WPath();
+} else {
+  $spath = new WPath($spath, 0);
+  if (!$spath->IsAbsolute()) {
+	  $spath->ToAbsolute($bpath);
+  }
+}
+
+if (!$dpath) {
+	  $dpath = $spath->Duplicate(0);
+} else {
+    $dpath = new WPath($dpath);
+    if (!$dpath->IsAbsolute()) {
+	   $dpath->ToAbsolute($bpath);
+    }
+}	
+	 
+
+if (($spath->Compare($dpath) == 0) && !$suffix && !$overwrite) {
    push @ierrors, "Source and Dest directories are same, you've given an empty suffix, but no ovewrite option";
 }
-if (!-d "$sdir" && !$create_dir) {
-	push @ierrors, "Souce directory '$sdir' doesn't exist and CREATE_DIRECTORY option not set\n";
-}
-if (!-d "$ddir" && !$create_dir) {
-	push @ierrors, "Destination directory '$ddir' doesn't exist and CREATE_DIRECTORY option not set\n";
+
+if (!-d $spath->Full()) {
+	push @ierrors, sprintf ("Souce directory '%s' doesn't exist\n", $spath->Full());
+}	
+if (!-d $dpath->Full() && !$create_dir) {
+	push @ierrors, sprintf ("Destination directory '%s' doesn't exist and CREATE_DIRECTORY is not set\n", $dpath->Full());
 }
 
 if ($tolerance) {
@@ -122,26 +134,55 @@ if (@ARGV) {
 		}
 	}
 }
-if ($in_fname && (!-f "$in_fname")) {
-   if (-f "$sdir/$in_fname") {
-	  $in_fname = "$sdir/$in_fname";
-   } else {
-	   push @ierrors, "input filename '$in_fname' doesn't exist";
-   }
-}
-# Check for where we write to out fname
-if ($out_fname) {
-	if (index($out_fname,'/') >= 0) { # probably has a path.
-		my @path = split /\//, $out_fname;
-		pop @path;  # get rid of filename.
-		my $npath = join ( '/', @path);
-		if (!-d "$npath") {
-			push @ierrors, "Can't write to filename/path $out_fname\n";
-		}
-	} else { #tack '$ddir' onto it
-		$out_fname = "$ddir/$out_fname";
+my $in_fpath = 0;
+if ($in_fname) {	   
+	$in_fpath = new WPath($in_fname, {has_file => 1});
+	if (!-f $in_fpath->Full()) {
+		# first see if we can add 'bpath'. Only works if not absolute path
+		if (!$in_fpath->IsAbsolute()) {
+			$in_fpath->ToAbsolute($bpath);
+			if (! -f $in_fpath->Full()) {
+				# Try 'spath' instead. To get here we know it's not absolute
+				$in_fpath = new WPath ($in_fname, {has_file => 1});
+				$in_fpath->ToAbsolute($spath);
+				if (! -f $in_fpath->Full()) {
+					push @ierrors, "Can't find input file '$in_fname'";
+					$in_fpath = 0;
+				}
+			}
+	   } else { # if already absolute then just flag as not found
+		   push @ierrors, "Can't find input file '$in_fname'";
+		   $in_fpath = 0;
+	   }
 	}
 }
+
+# if we get here with an 'in_fpath', then we know the file exists. Useful for later
+
+# Check for where we write to out fname
+my $out_fpath = 0;
+if ($out_fname) {
+	$out_fpath = new WPath($out_fname, {has_file => 1});
+	if (! -d $out_fpath->Path()) {
+	   if (!$out_fpath->IsAbsolute()) {
+		   # try bpath first?
+		  $out_fpath->ToAbsolute($bpath);
+		  if (! -d $out_fpath->Path() ) { # nope.  Try dpath?
+		    $out_fpath = new WPath($out_fname, {has_file => 1});
+			$out_fpath->ToAbsolute($dpath);
+			if (! -d $out_fpath->Path()) {
+				push @ierrors, "Unable to write to path of '$out_fname'";
+				$out_fpath =0 ;
+			}
+		  }
+	   } else {  # if already absolutem just flag as not found
+			push @ierrors, "Unable to write to path of '$out_fname'";
+	   }
+	}
+}
+
+# If we get here with out_fpath, then we know the directory exists.  Possibly needs
+# To check if writable?
 
 if (@ierrors) {
 	usage (@ierrors);
@@ -175,13 +216,13 @@ sub usage {
 }	
 $tolerance *= 1;
 if ($DEBUG > 0) {
-	print "Source Dir: $sdir\n";
-	print "Dest Dir: $ddir\n";
-	print "Suffix: $suffix\n";
-	print "Tolerance: $tolerance\n";
-	print "Docrop: $docrop\n";
-	print "Input Filename: $in_fname\n";
-	print "Output filename: $out_fname\n";
+	printf "Source Dir: %s\n",$spath->Path();
+	printf "Dest Dir: %s\n", $dpath->Path();
+	printf "Suffix: $suffix\n";
+	printf "Tolerance: $tolerance\n";
+	printf "Docrop: $docrop\n";
+	printf "Input Filename: $in_fname\n";
+	printf "Output filename: $out_fname\n";
 	if ($all) {
 	  print "Crop All\n";
 	} else {
@@ -197,43 +238,87 @@ if ($DEBUG > 0) {
 
 
 # Main read loop
-if ($out_fname) {
-	if (!open(OUTFILE, ">$out_fname")) {
+if ($out_fpath) {
+	if (!open(OUTFILE, ">" . $out_fpath->Full())) {
 	  print STDERR "Unale to open '$out_fname' for writing\n";
 	  exit 1;
 	}
 }
-if ($in_fname) {
-	if (!open(INFILE, "<$in_fname")) {
+if ($in_fpath) {
+	if (!open(INFILE, "<" , $in_fpath->Full())) {
 			print STDERR "Unable to open '$in_fname' for reading\n";
 			exit 1;
 	}
 } else {
-	if (!opendir(INDIR,"$sdir")) {
+	if (!opendir(INDIR,$spath->Full())) {
 		print STDERR "Can't open\n";
 		exit 1;
 	}
 }
+# There are several directories we can be dealing with:
+# * sdir - source dir.  This is the default place we'll look if we
+#          have no other information on where to look.
+# * ddir - destination dir.  This is the default place we'll put things
+#          if we have no other information.  Note that this might well
+#          be a relative dir.  I.e it will start with a dir name and no
+#          leading '/', or be './'.  We may have to handle DOS/Windows
+#          concepts like 'C:path/'  (i.e no leading /).  We'll see
+# * psdir - path given from infile when we encounter a:
+#             source_dir=
+#           note that this may also be 'relative', but will be made into
+#           an absolute when read
+# * fsdir - 'calculated' source directory for images.  This can be filled
+#             in by :
+#			 * $sdir
+#            * path being part of filename
+#            * $psdir
+# * pddir - path given from infile when we encounter a:
+#               destination_dir=
+#           I don't anticipate this actually being used as to me it
+#           makes little sense.  But why not, right?
+#           Again, may be relative
+# * fddir - 'calcuated' path to destination directory for images.  This 
+#           can be filled in by:
+#           * $ddir
+#           * $pddir
+#           * perhaps because it's part of the filename, but there's
+#           * no support for that yet
 while (1) {
-	my $fname = '';
-	my $fsdir = $sdir;
-	my $fddir = $ddir;
-	if ($in_fname) {
+	my $fname = '';  # filename we're working on
+	my $fsdir = $spath->Duplicate();
+	my $fddir = $dpath->Duplicate();
+	my $fpath  = 0;
+	if ($in_fname) {  # if getting this from a file
 	  $fname = <INFILE>;
 	  last if !$fname;
 	  chomp $fname;
 	  next if ($fname =~ m/^\s*$/);
-	  my @path = split /\//, $fname;
-	  $fname = pop @path;
-	  $fsdir = join('/', @path);
-	} else {
+	  if ($fname =~ m/^path=(.+)$/) {
+		 $fsdir = new WPath($1, 0);  # just the directory
+		 if (!$fsdir->IsAbsolute()) {
+			 # currenly only handle absolute directories in files
+			 print STDERR "$fname, not absolute\n";
+			 exit 1;
+		 }
+		 if (! -d $fsdir->Path()) {
+            printf "Directory '%s' doesn't exist\n", $fsdir->Path();
+			exit 1;			
+		 }
+		 next;
+	  }
+  	} else {
 		$fname = readdir(INDIR);
 		last if (!$fname);
     }
-	if (!-f "$fsdir/$fname") {
+	$fsdir = new WPath($fname, { has_file => 1});
+	if (!$fsdir->IsAbsolute()) {
+		$fsdir->ToAbsolute($spath);
+	}
+	if (!-f $fsdir->Full()) {
 		next;
 	}
-	my ($inname,$type) = split /\./, $fname;
+	my ($inname,$type) = split /\./, $fsdir->Filename();
+	
 	my $ttype = uc $type;
 	if (!defined $ttype ||
 	    (($ttype ne 'JPG') &&
@@ -242,9 +327,10 @@ while (1) {
 	   next;
 	}
 	my $outname = $inname . "$suffix";
+	$fddir->NewFile("$outname.$type");
 	print "FILE:$inname,$type,$outname\n";
 	my $im= Image::Magick->new;
-	my $x = $im->Read("$fsdir//$fname");
+	my $x = $im->Read($fsdir->Full());
 	warn "$x" if "$x";
 	my $itol = new TRecord('image',0,1);
 	$x = Calculate($im, $crop_colour, $itol);
@@ -253,10 +339,10 @@ while (1) {
 	
 	if ($x > 0) { # something changed
 		if ($out_fname) {
-			print OUTFILE "$fsdir/$fname\n";
+			print OUTFILE $fsdir->Full() . "\n";
 		}		 
 		if ($UPDATE) {
-			$x = $im->Write("$ddir/$outname.$type");
+			$x = $im->Write($fddir->Full());
 			warn "$x" if "$x";
 			print "Written\n";
 		}
@@ -547,3 +633,5 @@ sub Compare {
             ($tg <= $tolerance) &&
 			($tb <= $tolerance)
 }
+
+1;
