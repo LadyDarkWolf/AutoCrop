@@ -16,7 +16,16 @@ my $PGROUP = 3; # number of array elements for each pixel from GetPixels
 my $crop_colour = undef;
 my $ccrop_colour = undef;
 
+foreach (my $r = 0 ; $r<=1.0 ; $r += 0.1 ) {
+	foreach (my $g = 0 ; $g<=1.0 ; $g += 0.1 ) {
+		foreach (my $b = 0 ; $b<=1.0 ; $b += 0.1 ) {
+			my ($h, $s, $v) = RGBtoHSV ( $r, $g, $b);
+			print "$r,$g,$b = $h,$s,$v\n";
+		}
+	}
+}
 
+exit 0;
 # Things changed by GetOptions
 my $bpath = '';
 my $spath = '';
@@ -614,6 +623,35 @@ sub Convert {
 	return \@cc;
 }
 
+sub RGBtoHSV {
+	my ($r, $g, $b) = @_;
+	my $max = ( $r < $g ) ? $g : $r;
+	$max = ( $max < $b ) ? $b : $max;
+	my $min = ($r < $g) ?  $r : $g;
+	$min = ($min < $b ) ? $min : $b;
+	my $val = $max;
+	my $delta = $max - $min;
+	my $hue = 0;
+	my $sat = 0.0;
+	if ($delta == 0.0) {
+		return (0.0, 0.0, $val);
+	}
+	if ($max > 0.0) {
+		  $sat = ($delta / $max);
+	} else {
+		  return (0, 0, $val);
+	}
+	if ($max == $r) {
+		$hue = ($g -$b)/$delta;
+	} elsif ($max == $g) {
+		 $hue = 2.0 + ($b-$r)/$delta;
+	} elsif ($max == $b) {
+		  $hue = 4.0 + ($r - $g)/$delta;
+	}
+	$hue *= 60.0;
+	$hue += 360 if ($hue < 0);;
+	return ($hue, $sat, $val);
+}
 sub Compare {
 	my ($c1, $c2, $tol) = @_;
 	my ($r1, $g1, $b1) = @$c1;
